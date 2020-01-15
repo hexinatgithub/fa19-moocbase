@@ -79,8 +79,8 @@ class InnerNode extends BPlusNode {
     @Override
     public LeafNode get(DataBox key) {
         // TODO(hw2): implement
-
-        return null;
+        int i = numLessThanEqual(key, keys);
+        return getChild(i).get(key);
     }
 
     // See BPlusNode.getLeftmostLeaf.
@@ -88,16 +88,55 @@ class InnerNode extends BPlusNode {
     public LeafNode getLeftmostLeaf() {
         assert(children.size() > 0);
         // TODO(hw2): implement
-
-        return null;
+        return getChild(0).getLeftmostLeaf();
     }
 
     // See BPlusNode.put.
     @Override
     public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
         // TODO(hw2): implement
-
+        int i = numLessThanEqual(key, keys);
+        Optional<Pair<DataBox, Long>> optional = getChild(i).put(key, rid);
+        if (optional.isPresent()) {
+            Pair<DataBox, Long> pair = optional.get();
+            DataBox k = pair.getFirst();
+            Long p = pair.getSecond();
+            return insert(k, p);
+        }
         return Optional.empty();
+    }
+
+    private Optional<Pair<DataBox, Long>> insert(DataBox key, Long page) {
+        int order = metadata.getOrder();
+        insertEntry(key, page);
+        if (keys.size() == 2 * order + 1) {
+            DataBox splitKey = keys.get(order);
+            ArrayList<DataBox> sKeys = new ArrayList<>(keys.subList(order + 1, keys.size()));
+            ArrayList<Long> sChild = new ArrayList<>(children.subList(order + 1, children.size()));
+            keys.subList(order, keys.size()).clear();
+            children.subList(order + 1, children.size()).clear();
+            InnerNode newNode = new InnerNode(metadata, bufferManager, sKeys, sChild, treeContext);
+            sync();
+            return Optional.of(new Pair(splitKey, newNode.getPage().getPageNum()));
+        }
+        sync();
+        return Optional.empty();
+    }
+
+    private void insertEntry(DataBox key, Long page) {
+        int ki = 0, ci = 1;
+        if (keys.size() == 0 || key.compareTo(keys.get(0)) < 0) {
+            // do nothing
+        } else if (key.compareTo(keys.get(keys.size() - 1)) > 0) {
+            ki = keys.size();
+            ci = children.size();
+        } else {
+            ki = InnerNode.numLessThan(key, keys);
+            ci = ki + 1;
+        }
+        keys.add(ki, key);
+        children.add(ci, page);
+        sync();
     }
 
     // See BPlusNode.bulkLoad.
@@ -105,6 +144,28 @@ class InnerNode extends BPlusNode {
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data,
             float fillFactor) {
         // TODO(hw2): implement
+        BPlusNode node;
+        if (keys.size() == 0) {
+            node = new LeafNode(metadata, bufferManager, new ArrayList<>(), new ArrayList<>(),
+                    Optional.empty(), treeContext);
+            children.add(node.getPage().getPageNum());
+        } else {
+            node = getChild(children.size() - 1);
+        }
+
+        while (data.hasNext()) {
+            Optional<Pair<DataBox, Long>> optional = node.bulkLoad(data, fillFactor);
+            if (optional.isPresent()) {
+                Pair<DataBox, Long> pair = optional.get();
+                DataBox k = pair.getFirst();
+                Long p = pair.getSecond();
+                optional = insert(k, p);
+                if (optional.isPresent()) {
+                    return optional;
+                }
+                node = BPlusNode.fromBytes(metadata, bufferManager, treeContext, p);
+            }
+        }
 
         return Optional.empty();
     }
@@ -113,8 +174,8 @@ class InnerNode extends BPlusNode {
     @Override
     public void remove(DataBox key) {
         // TODO(hw2): implement
-
-        return;
+        int index = numLessThanEqual(key, keys);
+        getChild(index).remove(key);
     }
 
     // Helpers ///////////////////////////////////////////////////////////////////
@@ -152,6 +213,7 @@ class InnerNode extends BPlusNode {
     List<Long> getChildren() {
         return children;
     }
+
     /**
      * Returns the largest number d such that the serialization of an InnerNode
      * with 2d keys will fit on a single page.
