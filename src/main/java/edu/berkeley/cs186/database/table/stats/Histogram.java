@@ -3,6 +3,7 @@ package edu.berkeley.cs186.database.table.stats;
 import java.util.Iterator;
 
 import edu.berkeley.cs186.database.common.PredicateOperator;
+import edu.berkeley.cs186.database.common.iterator.BacktrackingIterator;
 import edu.berkeley.cs186.database.databox.DataBox;
 import edu.berkeley.cs186.database.table.Table;
 import edu.berkeley.cs186.database.table.Record;
@@ -113,16 +114,33 @@ public class Histogram {
      */
     public void buildHistogram(Table table, int attribute) {
         // TODO(hw3_part2): implement
-
+        Record record; int i; float quantized;
+        BacktrackingIterator<Record> it = table.iterator();
+        it.markNext();
         //1. first calculate the min and the max values
-
+        minValue = Float.MAX_VALUE;
+        maxValue = Float.MIN_VALUE;
+        while (it.hasNext()) {
+            record = it.next();
+            quantized = quantization(record, attribute);
+            minValue = Math.min(quantized, minValue);
+            maxValue = Math.max(quantized, maxValue);
+        }
         //2. calculate the width of each bin
-
+        width = (maxValue - minValue) / buckets.length;
         //3. create each bucket object
-
+        for (i = 0; i < buckets.length - 1; ++i) {
+            buckets[i] = new Bucket<>(minValue + i * width, minValue + (i + 1) * width);
+        }
+        buckets[i] = new Bucket<>(minValue + i * width, maxValue);
         //4. populate the data using the increment(value) method
-
-        return;
+        it.reset();
+        while (it.hasNext()) {
+            record = it.next();
+            quantized = quantization(record, attribute);
+            i = bucketIndex(quantized);
+            get(i).increment(quantized);
+        }
     }
 
     private int bucketIndex(float v) {
@@ -263,6 +281,10 @@ public class Histogram {
         float [] result = new float[this.buckets.length];
 
         // TODO(hw3_part2): implement
+        int j = bucketIndex(qvalue);;
+        for (int i = 0; i < buckets.length; i++) {
+            result[i] = i == j ? ((float) 1) / get(i).getDistinctCount() : 0;
+        }
 
         return result;
     }
@@ -275,6 +297,10 @@ public class Histogram {
         float [] result = new float[this.buckets.length];
 
         // TODO(hw3_part2): implement
+        int j = bucketIndex(qvalue);;
+        for (int i = 0; i < buckets.length; i++) {
+            result[i] = i == j ? 1 - (((float) 1) / get(i).getDistinctCount()) : 1;
+        }
 
         return result;
     }
@@ -287,6 +313,12 @@ public class Histogram {
         float [] result = new float[this.buckets.length];
 
         // TODO(hw3_part2): implement
+        int j = bucketIndex(qvalue);
+        for (int i = 0; i < buckets.length; i++) {
+            if (i == j) result[j] = (get(j).getEnd() - qvalue) / width;
+            else if (i > j) result[i] = 1;
+            else result[i] = 0;
+        }
 
         return result;
     }
@@ -299,6 +331,12 @@ public class Histogram {
         float [] result = new float[this.buckets.length];
 
         // TODO(hw3_part2): implement
+        int j = bucketIndex(qvalue);
+        for (int i = 0; i < buckets.length; i++) {
+            if (i == j) result[j] = (qvalue - get(j).getStart()) / width;
+            else if (i < j) result[i] = 1;
+            else result[i] = 0;
+        }
 
         return result;
     }
