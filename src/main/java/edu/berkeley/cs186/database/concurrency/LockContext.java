@@ -95,8 +95,79 @@ public class LockContext {
     public void acquire(TransactionContext transaction, LockType lockType)
     throws InvalidLockException, DuplicateLockRequestException {
         // TODO(hw4_part1): implement
+        checkReadonly();
+        checkRequestDuplicateLock(transaction);
+        checkRequestConflictLock(transaction, lockType);
+        checkRequestRedundantLock(transaction, lockType);
+        lockman.acquire(transaction, name, lockType);
+        updateParentNumChildLocks(transaction, +1);
+    }
 
-        return;
+    private void updateParentNumChildLocks(TransactionContext transaction, int num) {
+        LockContext parent;
+        if ((parent = parentContext()) == null) return;
+        parent.updateNumChildLocks(transaction, num);
+    }
+
+    private void updateNumChildLocks(TransactionContext transaction, int num) {
+        long transNum = transaction.getTransNum();
+        int numLocks = numChildLocks.getOrDefault(transNum, 0);
+        numChildLocks.put(transNum, Math.max(numLocks + num, 0));
+        if (numChildLocks.get(transNum) == 0)
+            numChildLocks.remove(transNum);
+        updateParentNumChildLocks(transaction, num);
+    }
+
+    private void checkReadonly() {
+        if (readonly) {
+            throw new UnsupportedOperationException(String.format(
+                    "Readonly context: %s", this));
+        }
+    }
+
+    private void checkRequestDuplicateLock(TransactionContext transaction)
+            throws DuplicateLockRequestException {
+        if (getExplicitLockType(transaction) != LockType.NL) {
+            throw new DuplicateLockRequestException(String.format(
+                    "A lock on %s is already hold by transaction %d.",
+                    name, transaction.getTransNum()));
+        }
+    }
+
+    private void checkRequestConflictLock(TransactionContext transaction, LockType lockType)
+            throws InvalidLockException {
+        LockContext parent = parentContext();
+        if (parent == null) return;
+        LockType temp = parent.getExplicitLockType(transaction);
+        if (!LockType.canBeParentLock(temp, lockType)) {
+            throw new InvalidLockException(String.format(
+                    "Transaction %d request a conflict lock %s, parent explicit lock type is %s.",
+                    transaction.getTransNum(), lockType, temp));
+        }
+    }
+
+    private void checkRequestRedundantLock(TransactionContext transaction, LockType lockType)
+            throws InvalidLockException {
+        LockContext parent = parentContext();
+        if (parent == null) return;
+        LockType temp = parent.getEffectiveLockType(transaction);
+        if (isRedundantLock(temp, lockType)) {
+            throw new InvalidLockException(String.format(
+                    "Transaction %d request a redundant lock %s, parent effective lock type is %s.",
+                    transaction.getTransNum(), lockType, temp));
+        }
+    }
+
+    private static boolean isRedundantLock(LockType ancestorEffectiveType, LockType lockType) {
+        switch (ancestorEffectiveType) {
+        case S:
+            return lockType == LockType.S ||
+                    lockType == LockType.IS;
+        case X:
+            return true;
+        case NL:
+        default: return false;
+        }
     }
 
     /**
@@ -113,8 +184,38 @@ public class LockContext {
     public void release(TransactionContext transaction)
     throws NoLockHeldException, InvalidLockException {
         // TODO(hw4_part1): implement
+        checkReadonly();
+        checkHeldLock(transaction);
+        checkReleaseConstraints(transaction);
+        lockman.release(transaction, name);
+        updateParentNumChildLocks(transaction, -1);
+    }
 
-        return;
+    // check held lock to release/promote/escalate
+    private void checkHeldLock(TransactionContext transaction)
+            throws NoLockHeldException{
+        if (getExplicitLockType(transaction) == LockType.NL) {
+            throw new NoLockHeldException(String.format(
+                    "No lock on %s is hold by transaction %d.",
+                    name, transaction.getTransNum()));
+        }
+    }
+
+    // check multigranularity locking constraints
+    private void checkReleaseConstraints(TransactionContext transaction)
+            throws InvalidLockException{
+        LockContext children;
+        LockType childType;
+        for (int i = 0; i < capacity(); i++) {
+            children = childContext(i);
+            childType = children.getExplicitLockType(transaction);
+            if (childType != LockType.NL) {
+                throw new InvalidLockException(String.format(
+                        "Transaction %d can't released %s lock on context %s, child context %s hold a %s lock.",
+                        transaction.getTransNum(), getExplicitLockType(transaction), name,
+                        children.name, childType));
+            }
+        }
     }
 
     /**
@@ -135,8 +236,82 @@ public class LockContext {
     public void promote(TransactionContext transaction, LockType newLockType)
     throws DuplicateLockRequestException, NoLockHeldException, InvalidLockException {
         // TODO(hw4_part1): implement
+        checkReadonly();
+        checkHeldLock(transaction);
+        upgrade(transaction, newLockType);
+    }
 
-        return;
+    // upgrade lock to NEWLOCKTYPE, release any descendant redundant lock is needed.
+    private void upgrade(TransactionContext transaction, LockType lockType) {
+        upgrade(transaction, lockType, false);
+    }
+
+    // upgrade lock to NEWLOCKTYPE, release any descendant redundant lock is needed.
+    private void upgrade(TransactionContext transaction, LockType lockType, boolean escalate)
+            throws InvalidLockException {
+        checkUpgradeLock(transaction, lockType);
+        checkUpgradeConstraints(transaction, lockType);
+        long transNum = transaction.getTransNum();
+        int childLocksNum = numChildLocks.getOrDefault(transNum, 0);
+        boolean clearDescendantLocks = escalate ||
+                ((lockType == LockType.X || lockType == LockType.S) && childLocksNum > 0);
+        List<ResourceName> releases = new ArrayList<>();
+        List<Lock> locks = lockman.getLocks(transaction);
+        LockType type;
+
+        if (clearDescendantLocks) {
+            for (Lock lock : locks) {
+                if ((lock.name.isDescendantOf(name)) ||
+                        lock.name.equals(name)) {
+                    releases.add(lock.name);
+                }
+            }
+        } else if (lockType == LockType.SIX) {
+            type = effectiveLockType(lockType);
+            for (Lock lock : locks) {
+                if ((lock.name.isDescendantOf(name) &&
+                        isRedundantLock(type, lock.lockType)) ||
+                        lock.name.equals(name)) {
+                    releases.add(lock.name);
+                }
+            }
+        }
+
+        if (releases.size() > 0) {
+            lockman.acquireAndRelease(transaction, name, lockType, releases);
+            updateNumChildLocks(transaction, -releases.size() + 1);
+        } else
+            lockman.promote(transaction, name, lockType);
+    }
+
+    private void checkUpgradeLock(TransactionContext transaction, LockType newLockType)
+            throws InvalidLockException {
+        LockType lockType = getExplicitLockType(transaction);
+        if (lockType == newLockType) {
+            throw new DuplicateLockRequestException(String.format(
+                    "A %s lock on %s is already hold by transaction %d.",
+                    lockType, name, transaction.getTransNum()));
+        }
+
+        if (!LockType.substitutable(newLockType, lockType)) {
+            throw new InvalidLockException(String.format(
+                    "Transaction %d can't substitutable lock %s with %s on context %s.",
+                    transaction.getTransNum(), lockType, newLockType, name));
+        }
+    }
+
+    // check promote would cause invalid state.
+    private void checkUpgradeConstraints(TransactionContext transaction, LockType lockType)
+            throws InvalidLockException {
+        LockContext parent = parentContext();
+        if (parent == null) return;
+        LockType temp = parent.getEffectiveLockType(transaction);
+        if (LockType.canBeParentLock(temp, lockType)) {
+            throw new InvalidLockException(String.format(
+                    "Transaction %d can't promote lock from %s to %s on context %s, parent context %s hold a %s lock.",
+                    transaction.getTransNum(), getExplicitLockType(transaction), lockType, name,
+                    parent.name, temp));
+        }
     }
 
     /**
@@ -162,8 +337,17 @@ public class LockContext {
      */
     public void escalate(TransactionContext transaction) throws NoLockHeldException {
         // TODO(hw4_part1): implement
-
-        return;
+        checkReadonly();
+        checkHeldLock(transaction);
+        switch (getExplicitLockType(transaction)) {
+        case IS:
+            upgrade(transaction, LockType.S, true);
+            break;
+        case SIX:
+        case IX:
+            upgrade(transaction, LockType.X, true);
+            break;
+        }
     }
 
     /**
@@ -176,6 +360,23 @@ public class LockContext {
             return LockType.NL;
         }
         // TODO(hw4_part1): implement
+        LockContext lockContext = this;
+        LockType temp;
+        while (lockContext != null) {
+            temp = lockman.getLockType(transaction, lockContext.name);
+            temp = effectiveLockType(temp);
+            if (temp != LockType.NL) return temp;
+            lockContext = lockContext.parentContext();
+        }
+        return LockType.NL;
+    }
+
+    private static LockType effectiveLockType(LockType lockType) {
+        switch (lockType) {
+            case SIX:
+            case S: return LockType.S;
+            case X: return LockType.X;
+        }
         return LockType.NL;
     }
 
@@ -187,7 +388,7 @@ public class LockContext {
             return LockType.NL;
         }
         // TODO(hw4_part1): implement
-        return LockType.NL;
+        return lockman.getLockType(transaction, name);
     }
 
     /**

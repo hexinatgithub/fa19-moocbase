@@ -19,8 +19,15 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(hw4_part1): implement
-
-        return false;
+        switch (a) {
+        case S: return b == IS || b == S || b == NL;
+        case X: return b == NL;
+        case IS: return b != X || b == NL;
+        case IX: return b == IS || b == IX || b == NL;
+        case SIX: return b == IS || b == NL;
+        // case NL:
+        default: return true;
+        }
     }
 
     /**
@@ -51,8 +58,7 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(hw4_part1): implement
-
-        return false;
+        return substitutable(parentLockType, parentLock(childLockType));
     }
 
     /**
@@ -66,8 +72,17 @@ public enum LockType {
             throw new NullPointerException("null lock type");
         }
         // TODO(hw4_part1): implement
-
-        return false;
+        switch (required) {
+        case S: return substitute == X ||
+                    substitute == SIX || substitute == S;
+        case X: return substitute == X;
+        case IS: return substitute != NL;
+        case IX: return substitute == X ||
+                    substitute == SIX || substitute == IX;
+        case SIX: return substitute == X || substitute == SIX;
+        // case NL:
+        default: return true;
+        }
     }
 
     @Override
