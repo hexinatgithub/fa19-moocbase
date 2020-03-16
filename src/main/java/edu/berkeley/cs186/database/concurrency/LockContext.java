@@ -100,22 +100,35 @@ public class LockContext {
         checkRequestConflictLock(transaction, lockType);
         checkRequestRedundantLock(transaction, lockType);
         lockman.acquire(transaction, name, lockType);
-        updateParentNumChildLocks(transaction, +1);
+        addParentNumChildLocks(transaction, +1);
     }
 
-    private void updateParentNumChildLocks(TransactionContext transaction, int num) {
+    private void addParentNumChildLocks(TransactionContext transaction, int num) {
         LockContext parent;
         if ((parent = parentContext()) == null) return;
-        parent.updateNumChildLocks(transaction, num);
+        parent.addNumChildLocks(transaction, num);
     }
 
-    private void updateNumChildLocks(TransactionContext transaction, int num) {
+    private void addNumChildLocks(TransactionContext transaction, int num) {
         long transNum = transaction.getTransNum();
         int numLocks = numChildLocks.getOrDefault(transNum, 0);
         numChildLocks.put(transNum, Math.max(numLocks + num, 0));
         if (numChildLocks.get(transNum) == 0)
             numChildLocks.remove(transNum);
-        updateParentNumChildLocks(transaction, num);
+        addParentNumChildLocks(transaction, num);
+    }
+
+    private void clearNumChildLocks(TransactionContext transaction) {
+        numChildLocks.remove(transaction.getTransNum());
+        addParentNumChildLocks(transaction, -1);
+    }
+
+    private void updateChildNumLocks(TransactionContext transaction, List<ResourceName> releases) {
+        int size = releases.size();
+        for (int i = size - 1; i >= 0; i--) {
+            LockContext.fromResourceName(lockman, releases.get(i)).
+                    clearNumChildLocks(transaction);
+        }
     }
 
     private void checkReadonly() {
@@ -188,7 +201,7 @@ public class LockContext {
         checkHeldLock(transaction);
         checkReleaseConstraints(transaction);
         lockman.release(transaction, name);
-        updateParentNumChildLocks(transaction, -1);
+        addParentNumChildLocks(transaction, -1);
     }
 
     // check held lock to release/promote/escalate
@@ -204,17 +217,11 @@ public class LockContext {
     // check multigranularity locking constraints
     private void checkReleaseConstraints(TransactionContext transaction)
             throws InvalidLockException{
-        LockContext children;
-        LockType childType;
-        for (int i = 0; i < capacity(); i++) {
-            children = childContext(i);
-            childType = children.getExplicitLockType(transaction);
-            if (childType != LockType.NL) {
-                throw new InvalidLockException(String.format(
-                        "Transaction %d can't released %s lock on context %s, child context %s hold a %s lock.",
-                        transaction.getTransNum(), getExplicitLockType(transaction), name,
-                        children.name, childType));
-            }
+        if (numChildLocks.
+                getOrDefault(transaction.getTransNum(), 0) > 0) {
+            throw new InvalidLockException(String.format(
+                    "Transaction %d can't released %s lock on context %s.",
+                    transaction.getTransNum(), getExplicitLockType(transaction), name));
         }
     }
 
@@ -279,7 +286,8 @@ public class LockContext {
 
         if (releases.size() > 0) {
             lockman.acquireAndRelease(transaction, name, lockType, releases);
-            updateNumChildLocks(transaction, -releases.size() + 1);
+            releases.remove(name);
+            updateChildNumLocks(transaction, releases);
         } else
             lockman.promote(transaction, name, lockType);
     }

@@ -120,7 +120,8 @@ public class PageDirectory implements HeapFile {
         }
 
         Page page = this.firstHeader.loadPageWithSpace(requiredSpace);
-
+        LockUtil.ensureSufficientLockHeld(lockContext.childContext(page.getPageNum()),
+                LockType.X, true);
         return new DataPage(pageDirectoryId, page);
     }
 
@@ -357,7 +358,6 @@ public class PageDirectory implements HeapFile {
                     page.getBuffer().putInt(pageDirectoryId).putInt(headerOffset).putShort(unusedSlot);
 
                     ++this.numDataPages;
-
                     return page;
                 }
 
@@ -369,6 +369,7 @@ public class PageDirectory implements HeapFile {
                 // no space on this header page, try next one
                 return this.nextPage.loadPageWithSpace(requiredSpace);
             } finally {
+                lockContext.capacity(numDataPages);
                 this.page.unpin();
             }
         }

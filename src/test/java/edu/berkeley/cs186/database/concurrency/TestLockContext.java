@@ -216,6 +216,81 @@ public class TestLockContext {
     }
 
     @Test
+    @Category(HiddenTests.class)
+    public void testSimplePromoteSIX() {
+        TransactionContext t1 = transactions[1];
+        dbLockContext.acquire(t1, LockType.IX);
+        tableLockContext.acquire(t1, LockType.IS);
+        pageLockContext.acquire(t1, LockType.S);
+        dbLockContext.promote(t1, LockType.SIX);
+        assertEquals(0, (int) dbLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(0, (int) tableLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(1, lockManager.getLocks(t1).size());
+        assertEquals(dbLockContext.name, lockManager.getLocks(t1).get(0).name);
+        assertEquals(LockType.SIX, lockManager.getLocks(t1).get(0).lockType);
+    }
+
+    @Test
+    @Category(HiddenTests.class)
+    public void testSimplePromoteS() {
+        TransactionContext t1 = transactions[1];
+        dbLockContext.acquire(t1, LockType.IS);
+        tableLockContext.acquire(t1, LockType.IS);
+        pageLockContext.acquire(t1, LockType.S);
+        dbLockContext.promote(t1, LockType.S);
+        assertEquals(0, (int) dbLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(0, (int) tableLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(1, lockManager.getLocks(t1).size());
+        assertEquals(dbLockContext.name, lockManager.getLocks(t1).get(0).name);
+        assertEquals(LockType.S, lockManager.getLocks(t1).get(0).lockType);
+    }
+
+    @Test
+    @Category(HiddenTests.class)
+    public void testSimplePromoteX() {
+        TransactionContext t1 = transactions[1];
+        dbLockContext.acquire(t1, LockType.IX);
+        tableLockContext.acquire(t1, LockType.IX);
+        pageLockContext.acquire(t1, LockType.X);
+        dbLockContext.promote(t1, LockType.X);
+        assertEquals(0, (int) dbLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(0, (int) tableLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(1, lockManager.getLocks(t1).size());
+        assertEquals(dbLockContext.name, lockManager.getLocks(t1).get(0).name);
+        assertEquals(LockType.X, lockManager.getLocks(t1).get(0).lockType);
+    }
+
+    @Test
+    @Category(HiddenTests.class)
+    public void testPromoteISToX() {
+        TransactionContext t1 = transactions[1];
+        dbLockContext.acquire(t1, LockType.IS);
+        tableLockContext.acquire(t1, LockType.IS);
+        pageLockContext.acquire(t1, LockType.S);
+        dbLockContext.promote(t1, LockType.X);
+        assertEquals(0, (int) dbLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(0, (int) tableLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(1, lockManager.getLocks(t1).size());
+        assertEquals(dbLockContext.name, lockManager.getLocks(t1).get(0).name);
+        assertEquals(LockType.X, lockManager.getLocks(t1).get(0).lockType);
+    }
+
+    @Test
+    @Category(HiddenTests.class)
+    public void testPromoteSIXToX() {
+        TransactionContext t1 = transactions[1];
+        dbLockContext.acquire(t1, LockType.SIX);
+        tableLockContext.acquire(t1, LockType.IX);
+        pageLockContext.acquire(t1, LockType.X);
+        dbLockContext.promote(t1, LockType.X);
+        assertEquals(0, (int) dbLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(0, (int) tableLockContext.numChildLocks.getOrDefault(t1.getTransNum(), 0));
+        assertEquals(1, lockManager.getLocks(t1).size());
+        assertEquals(dbLockContext.name, lockManager.getLocks(t1).get(0).name);
+        assertEquals(LockType.X, lockManager.getLocks(t1).get(0).lockType);
+    }
+
+    @Test
     @Category(PublicTests.class)
     public void testEscalateFail() {
         TransactionContext t1 = transactions[1];
