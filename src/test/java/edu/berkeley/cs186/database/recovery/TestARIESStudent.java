@@ -61,6 +61,85 @@ public class TestARIESStudent {
         // You should use loadRecoveryManager instead of new ARIESRecoveryManager(..) to
         // create the recovery manager, and use runAnalysis(inner) instead of
         // inner.restartAnalysis() to call the analysis routine.
+        byte[] before = new byte[] { (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00 };
+        byte[] after = new byte[] { (byte) 0xBA, (byte) 0xAD, (byte) 0xF0, (byte) 0x0D };
+
+        LogManager logManager = getLogManager(recoveryManager);
+
+        DummyTransaction transaction1 = DummyTransaction.create(1L);
+        DummyTransaction transaction2 = DummyTransaction.create(2L);
+
+        Map<Long, Long> dirtyPageTable = new HashMap<>();
+        Map<Long, Pair<Transaction.Status, Long>> transactionTable = new HashMap<>();
+        Map<Long, List<Long>> touchedPages = new HashMap<>();
+
+        List<Long> LSNs = new ArrayList<>();
+        LSNs.add(logManager.appendToLog(new BeginCheckpointLogRecord(9876543210L))); // 0
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000001L, LSNs.get(0), (short) 0, before,
+                after))); // 1
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000002L, LSNs.get(1), (short) 0, before,
+                after))); // 2
+        LSNs.add(logManager.appendToLog(new CommitTransactionLogRecord(1L, LSNs.get(2)))); // 3
+        LSNs.add(logManager.appendToLog(new EndTransactionLogRecord(1L, LSNs.get(3)))); // 4
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(2L, 10000000001L, 0, (short) 0, before,
+                after))); // 5
+
+        dirtyPageTable.put(10000000001L, LSNs.get(1));
+        dirtyPageTable.put(10000000002L, LSNs.get(2));
+        transactionTable.put(1L, new Pair<>(Transaction.Status.RUNNING, LSNs.get(2)));
+        touchedPages.put(1L, Arrays.asList(10000000001L, 10000000002L));
+
+        LSNs.add(logManager.appendToLog(new EndCheckpointLogRecord(dirtyPageTable, transactionTable, touchedPages))); // 6
+
+        // flush everything - recovery tests should always start
+        // with a clean load from disk, and here we want everything sent to disk first.
+        // Note: this does not call RecoveryManager#close - it only closes the
+        // buffer manager and disk space manager.
+        shutdownRecoveryManager(recoveryManager);
+
+        // load from disk again
+        recoveryManager = loadRecoveryManager(testDir);
+
+        // new recovery manager - tables/log manager/other state loaded with old manager are different
+        // with the new recovery manager
+        logManager = getLogManager(recoveryManager);
+        dirtyPageTable = getDirtyPageTable(recoveryManager);
+        Map<Long, TransactionTableEntry> analysisTransactionTable = getTransactionTable(recoveryManager);
+        List<String> lockRequests = getLockRequests(recoveryManager);
+
+        runAnalysis(recoveryManager);
+
+        // Xact table
+        assertFalse(analysisTransactionTable.containsKey(1L));
+        assertTrue(analysisTransactionTable.containsKey(2L));
+        assertEquals(new HashSet<>(Collections.singletonList(10000000001L)),
+                analysisTransactionTable.get(2L).touchedPages);
+
+        // DPT
+        assertTrue(dirtyPageTable.containsKey(10000000001L));
+        assertTrue(dirtyPageTable.containsKey(10000000002L));
+        assertEquals((long) LSNs.get(1), (long) dirtyPageTable.get(10000000001L));
+        assertEquals((long) LSNs.get(2), (long) dirtyPageTable.get(10000000002L));
+
+        // status/cleanup
+        assertEquals(Transaction.Status.COMPLETE, transaction1.getStatus());
+        assertTrue(transaction1.cleanedUp);
+        assertEquals(Transaction.Status.RECOVERY_ABORTING, transaction2.getStatus());
+        assertFalse(transaction2.cleanedUp);
+
+        // lock requests made
+        assertEquals(Arrays.asList(
+                "request 1 X(database/1/10000000001)",
+                "request 1 X(database/1/10000000002)",
+                "request 2 X(database/1/10000000001)"
+        ), lockRequests);
+
+        // transaction counter - from begin checkpoint
+        assertEquals(9876543210L, getTransactionCounter(recoveryManager));
+
+        // FlushedLSN
+        assertEquals(LogManagerImpl.maxLSN(LogManagerImpl.getLSNPage(LSNs.get(6))),
+                logManager.getFlushedLSN());
     }
 
     @Test
@@ -69,6 +148,57 @@ public class TestARIESStudent {
         // You should use loadRecoveryManager instead of new ARIESRecoveryManager(..) to
         // create the recovery manager, and use runRedo(inner) instead of
         // inner.restartRedo() to call the analysis routine.
+        byte[] before = new byte[] { (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00 };
+        byte[] after = new byte[] { (byte) 0xBA, (byte) 0xAD, (byte) 0xF0, (byte) 0x0D };
+
+        LogManager logManager = getLogManager(recoveryManager);
+        DiskSpaceManager dsm = getDiskSpaceManager(recoveryManager);
+        BufferManager bm = getBufferManager(recoveryManager);
+
+        DummyTransaction transaction1 = DummyTransaction.create(1L);
+
+        List<Long> LSNs = new ArrayList<>();
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000001L, 0L, (short) 0, before,
+                after))); // 0
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000002L, LSNs.get(0), (short) 1,
+                after, before))); // 1
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000003L, LSNs.get(1), (short) 2,
+                before, after))); // 2
+        LSNs.add(logManager.appendToLog(new AbortTransactionLogRecord(1L, LSNs.get(2)))); // 3
+        LSNs.add(logManager.appendToLog(new UndoUpdatePageLogRecord(
+                1L, 10000000003L, LSNs.get(3), LSNs.get(1), (short) 2, before))); // 4
+        LSNs.add(logManager.appendToLog(new UndoUpdatePageLogRecord(
+                1L, 10000000002L, LSNs.get(4), LSNs.get(0), (short) 1, after))); // 5
+
+        // actually do the first and second write (and get it flushed to disk)
+        logManager.fetchLogRecord(LSNs.get(0)).redo(dsm, bm);
+        logManager.fetchLogRecord(LSNs.get(1)).redo(dsm, bm);
+
+        // flush everything - recovery tests should always start
+        // with a clean load from disk, and here we want everything sent to disk first.
+        // Note: this does not call RecoveryManager#close - it only closes the
+        // buffer manager and disk space manager.
+        shutdownRecoveryManager(recoveryManager);
+
+        // load from disk again
+        recoveryManager = loadRecoveryManager(testDir);
+
+        // set up dirty page table - xact table is empty (transaction ended)
+        Map<Long, Long> dirtyPageTable = getDirtyPageTable(recoveryManager);
+        dirtyPageTable.put(10000000001L, LSNs.get(0));
+        dirtyPageTable.put(10000000002L, LSNs.get(1));
+        dirtyPageTable.put(10000000003L, LSNs.get(2));
+
+        // set up checks for redo - these get called in sequence with each LogRecord#redo call
+        setupRedoChecks(Arrays.asList(
+                (LogRecord record) -> assertEquals((long) LSNs.get(2), (long) record.LSN),
+                (LogRecord record) -> assertEquals((long) LSNs.get(4), (long) record.LSN),
+                (LogRecord record) -> assertEquals((long) LSNs.get(5), (long) record.LSN)
+        ));
+
+        runRedo(recoveryManager);
+
+        finishRedoChecks();
     }
 
     @Test
@@ -77,6 +207,83 @@ public class TestARIESStudent {
         // You should use loadRecoveryManager instead of new ARIESRecoveryManager(..) to
         // create the recovery manager, and use runUndo(inner) instead of
         // inner.restartUndo() to call the analysis routine.
+        byte[] before = new byte[] { (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00 };
+        byte[] after = new byte[] { (byte) 0xBA, (byte) 0xAD, (byte) 0xF0, (byte) 0x0D };
+
+        LogManager logManager = getLogManager(recoveryManager);
+        DiskSpaceManager dsm = getDiskSpaceManager(recoveryManager);
+        BufferManager bm = getBufferManager(recoveryManager);
+
+        DummyTransaction transaction1 = DummyTransaction.create(1L);
+        DummyTransaction transaction2 = DummyTransaction.create(2L);
+
+        List<Long> LSNs = new ArrayList<>();
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000001L, 0L, (short) 0, before,
+                after))); // 0
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(1L, 10000000002L, LSNs.get(0), (short) 1,
+                before, after))); // 1
+        LSNs.add(logManager.appendToLog(new AbortTransactionLogRecord(1L, LSNs.get(1)))); // 2
+        LSNs.add(logManager.appendToLog(new UndoUpdatePageLogRecord(
+                1L, 10000000002L, LSNs.get(2), LSNs.get(0), (short) 1, before))); // 3
+        LSNs.add(logManager.appendToLog(new UpdatePageLogRecord(2L, 10000000003L, 0L, (short) 0, before,
+                after))); // 4
+        LSNs.add(logManager.appendToLog(new AbortTransactionLogRecord(2L, LSNs.get(4)))); // 5
+        LSNs.add(logManager.appendToLog(new UndoUpdatePageLogRecord(
+                2L, 10000000003L, LSNs.get(5), 0L, (short) 1, before))); // 6
+
+        // actually do the writes
+        for (int i = 0; i < 6; ++i) {
+            LogRecord record = logManager.fetchLogRecord(LSNs.get(i));
+            if (record.isRedoable())
+                logManager.fetchLogRecord(LSNs.get(i)).redo(dsm, bm);
+        }
+
+        // flush everything - recovery tests should always start
+        // with a clean load from disk, and here we want everything sent to disk first.
+        // Note: this does not call RecoveryManager#close - it only closes the
+        // buffer manager and disk space manager.
+        shutdownRecoveryManager(recoveryManager);
+
+        // load from disk again
+        recoveryManager = loadRecoveryManager(testDir);
+
+        // set up xact table - leaving DPT empty
+        Map<Long, TransactionTableEntry> transactionTable = getTransactionTable(recoveryManager);
+        TransactionTableEntry entry1 = new TransactionTableEntry(transaction1);
+        TransactionTableEntry entry2 = new TransactionTableEntry(transaction2);
+        entry1.lastLSN = LSNs.get(3);
+        entry1.touchedPages = new HashSet<>(Arrays.asList(10000000001L, 10000000002L));
+        entry1.transaction.setStatus(Transaction.Status.RECOVERY_ABORTING);
+        transactionTable.put(1L, entry1);
+        entry2.lastLSN = LSNs.get(6);
+        entry2.touchedPages = new HashSet<>(Collections.singletonList(10000000003L));
+        entry2.transaction.setStatus(Transaction.Status.RECOVERY_ABORTING);
+        transactionTable.put(2L, entry2);
+        logManager = getLogManager(recoveryManager);
+
+        // set up checks for undo - these get called in sequence with each LogRecord#redo call
+        // (which should be called on CLRs)
+        setupRedoChecks(Collections.singletonList(
+                (LogRecord record) -> {
+                    assertEquals(LogType.UNDO_UPDATE_PAGE, record.getType());
+                    assertNotNull("log record not appended to log yet", record.LSN);
+                    assertFalse(transactionTable.containsKey(2L));
+                    assertEquals(Optional.of(10000000001L), record.getPageNum());
+                }
+        ));
+
+        runUndo(recoveryManager);
+
+        finishRedoChecks();
+
+        assertEquals(Transaction.Status.COMPLETE, transaction1.getStatus());
+
+        Iterator<LogRecord> iter = logManager.scanFrom(LSNs.get(6));
+        iter.next();
+        assertEquals(LogType.END_TRANSACTION, iter.next().getType());
+        assertEquals(LogType.UNDO_UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.END_TRANSACTION, iter.next().getType());
+        assertFalse(iter.hasNext());
     }
 
     @Test
@@ -84,6 +291,92 @@ public class TestARIESStudent {
         // TODO(hw5): write your own test on all of RecoveryManager
         // You should use loadRecoveryManager instead of new ARIESRecoveryManager(..) to
         // create the recovery manager.
+        byte[] before = new byte[] { (byte) 0x00, (byte) 0x00, (byte) 0x00, (byte) 0x00 };
+        byte[] after = new byte[] { (byte) 0xBA, (byte) 0xAD, (byte) 0xF0, (byte) 0x0D };
+
+        Transaction transaction1 = DummyTransaction.create(1L);
+        recoveryManager.startTransaction(transaction1);
+        Transaction transaction2 = DummyTransaction.create(2L);
+        recoveryManager.startTransaction(transaction2);
+        Transaction transaction3 = DummyTransaction.create(3L);
+        recoveryManager.startTransaction(transaction3);
+
+        List<Long> LSNs = new ArrayList<>();
+
+        LSNs.add(recoveryManager.logPageWrite(1L, 10000000001L, (short) 0, before, after));  // 0
+        recoveryManager.savepoint(1L, "Transaction1-1");
+        LSNs.add(recoveryManager.logPageWrite(1L, 10000000002L, (short) 1, after, before));  // 1
+        LSNs.add(recoveryManager.logPageWrite(2L, 10000000003L, (short) 2, before, after));  // 2
+        recoveryManager.rollbackToSavepoint(1L, "Transaction1-1");
+        LSNs.add(recoveryManager.logPageWrite(1L, 10000000002L, (short) 1, before, after));  // 3
+        LSNs.add(recoveryManager.logPageWrite(3L, 10000000004L, (short) 0, before, after));  // 4
+        LSNs.add(recoveryManager.commit(1L));  // 5
+        LSNs.add(recoveryManager.logPageWrite(3L, 10000000005L, (short) 3, after, before));  // 6
+        LSNs.add(recoveryManager.abort(3L));  // 7
+
+        // flush everything - recovery tests should always start
+        // with a clean load from disk, and here we want everything sent to disk first.
+        // Note: this does not call RecoveryManager#close - it only closes the
+        // buffer manager and disk space manager.
+        shutdownRecoveryManager(recoveryManager);
+
+        // load from disk again
+        recoveryManager = loadRecoveryManager(testDir);
+
+        LogManager logManager = getLogManager(recoveryManager);
+        Map<Long, TransactionTableEntry> transactionTable = getTransactionTable(recoveryManager);
+
+        recoveryManager.restart();
+
+        assertFalse(transactionTable.containsKey(1L));
+        assertTrue(transactionTable.containsKey(2L));
+        assertTrue(transactionTable.containsKey(3L));
+
+        Iterator<LogRecord> iter = logManager.iterator();
+        assertEquals(LogType.MASTER, iter.next().getType());
+        assertEquals(LogType.BEGIN_CHECKPOINT, iter.next().getType());
+        assertEquals(LogType.END_CHECKPOINT, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.UNDO_UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.COMMIT_TRANSACTION, iter.next().getType());
+        assertEquals(LogType.UPDATE_PAGE, iter.next().getType());
+        assertEquals(LogType.ABORT_TRANSACTION, iter.next().getType());
+
+        LogRecord record = iter.next();
+        assertEquals(LogType.END_TRANSACTION, record.getType());
+        assertEquals(Optional.of(1L), record.getTransNum());
+
+        record = iter.next();
+        assertEquals(LogType.ABORT_TRANSACTION, record.getType());
+        assertEquals(Optional.of(2L), record.getTransNum());
+
+        assertFalse(iter.hasNext());
+
+        shutdownRecoveryManager(recoveryManager);
+
+        // load from disk again
+        recoveryManager = loadRecoveryManager(testDir);
+        transactionTable = getTransactionTable(recoveryManager);
+
+        redoMethods.clear();
+        setupRedoChecks(Collections.emptyList());
+
+        Runnable undo = recoveryManager.restart(); // run analysis and redo in restart recovery
+
+        finishRedoChecks(); // redo shouldn't call
+        assertFalse(transactionTable.containsKey(1L));
+        assertTrue(transactionTable.containsKey(2L));
+        assertTrue(transactionTable.containsKey(3L));
+
+        undo.run();
+
+        assertFalse(transactionTable.containsKey(1L));
+        assertFalse(transactionTable.containsKey(2L));
+        assertFalse(transactionTable.containsKey(3L));
     }
 
     // TODO(hw5): add as many (ungraded) tests as you want for testing!

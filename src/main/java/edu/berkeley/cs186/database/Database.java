@@ -132,9 +132,9 @@ public class Database implements AutoCloseable {
         this.executor = new ThreadPool();
 
         // TODO(hw5): change to use ARIES recovery manager
-        recoveryManager = new DummyRecoveryManager();
-        //recoveryManager = new ARIESRecoveryManager(lockManager.databaseContext(),
-        //        this::beginRecoveryTranscation, this::setTransactionCounter, this::getTransactionCounter);
+        // recoveryManager = new DummyRecoveryManager();
+        recoveryManager = new ARIESRecoveryManager(lockManager.databaseContext(),
+                this::beginRecoveryTranscation, this::setTransactionCounter, this::getTransactionCounter);
 
         diskSpaceManager = new DiskSpaceManagerImpl(fileDir, recoveryManager);
         bufferManager = new BufferManagerImpl(diskSpaceManager, recoveryManager, numMemoryPages,
@@ -1143,9 +1143,7 @@ public class Database implements AutoCloseable {
             recoveryManager.commit(transNum);
 
             this.cleanup();
-            /*
             executor.execute(this::cleanup);
-            */
         }
 
         @Override
